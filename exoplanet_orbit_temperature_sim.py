@@ -45,7 +45,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-
 # Physical constants
 G = 6.67430e-11
 AU_M = 1.495978707e11
@@ -65,7 +64,6 @@ ORBIT_POINTS = 420
 LATITUDE_BANDS = [-90, -60, -30, 0, 30, 60, 90]
 PLANET_DISPLAY_SCALE = 1.5
 STAR_DISPLAY_SCALE = 2.0
-
 
 # Data structures
 @dataclass
@@ -105,7 +103,11 @@ class Exoplanet:
     def has_varying_eccentricity(self) -> bool:
         return abs(self.eccentricity_max - self.eccentricity_min) > 1e-6
 
+
+# ------------------------------------------------------------
 # Built-in Earth/Sun fallback
+# ------------------------------------------------------------
+
 def earth_sun_planet() -> Exoplanet:
     """
     Built-in Earth/Sun example.
@@ -142,6 +144,7 @@ def parse_float(value: object, default: float = math.nan) -> float:
         return float(text)
     except ValueError:
         return default
+
 
 def clamp_eccentricity(e: float) -> float:
     if not math.isfinite(e):
@@ -519,36 +522,23 @@ class ExoplanetOrbitApp:
         for key in [
             "Selected planet",
             "Host star",
-            "Real orbital period",
-            "Animation scale",
-            "Elapsed real time",
-            "Simulated orbit count",
+            "Orbital period",
             "Semi-major axis",
-            "Eccentricity now",
-            "Eccentricity limits",
+            "Eccentricity",
             "Current periapsis",
             "Current apoapsis",
             "Current distance",
             "Orbital speed",
             "Global temp",
-            "Periapsis temp",
-            "Apoapsis temp",
-            "Substellar latitude",
             "North pole temp",
             "Equator temp",
             "South pole temp",
-            "Animation status",
         ]:
             self._add_metric_row(key)
 
         legend_text = (
             "Space: pause/resume\n"
-            "Esc: quit\n\n"
-            "Orbit guide:\n"
-            "• bright dashed orbit = current eccentricity\n"
-            "• inner pale orbit = minimum eccentricity limit\n"
-            "• outer red orbit = maximum eccentricity limit\n\n"
-            "The local-temperature model is only a simplified latitude-band approximation."
+            "Esc: quit\n"
         )
         tk.Label(
             self.sidebar,
@@ -586,11 +576,11 @@ class ExoplanetOrbitApp:
                 peri = periapsis_au(planet, e)
                 apo = apoapsis_au(planet, e)
                 if peri > 0:
-                    temps.append(global_equilibrium_temperature_k(planet, peri) - 273.15)
+                    temps.append(global_equilibrium_temperature_k(planet, peri))
                 if apo > 0:
-                    temps.append(global_equilibrium_temperature_k(planet, apo) - 273.15)
+                    temps.append(global_equilibrium_temperature_k(planet, apo))
         if not temps:
-            return -100.0, 100.0
+            return 150.0, 400.0
         low = min(temps) - 30.0
         high = max(temps) + 30.0
         if abs(high - low) < 1.0:
@@ -659,31 +649,26 @@ class ExoplanetOrbitApp:
         x, y, r = relative_position_au(planet, nu, eccentricity)
         speed = orbital_speed_m_s(planet, r)
         global_k = global_equilibrium_temperature_k(planet, r)
-        global_c = global_k - 273.15
         sub_lat = substellar_latitude_deg(planet, sim_days)
         local = {
-            lat: local_temperature_c(global_c, lat, sub_lat)
+            lat: local_temperature_c(global_k, lat, sub_lat)
             for lat in LATITUDE_BANDS
         }
         peri = periapsis_au(planet, eccentricity)
         apo = apoapsis_au(planet, eccentricity)
-        peri_temp_c = global_equilibrium_temperature_k(planet, peri) - 273.15
-        apo_temp_c = global_equilibrium_temperature_k(planet, apo) - 273.15
         return {
             "nu": nu,
             "x": x,
             "y": y,
             "r": r,
             "speed": speed,
-            "global_c": global_c,
+            "global_k": global_k,
             "sub_lat": sub_lat,
-            "north_pole_c": local[90],
-            "equator_c": local[0],
-            "south_pole_c": local[-90],
+            "north_pole_k": local[90],
+            "equator_k": local[0],
+            "south_pole_k": local[-90],
             "peri_au": peri,
             "apo_au": apo,
-            "peri_temp_c": peri_temp_c,
-            "apo_temp_c": apo_temp_c,
             **{f"lat_{lat}": temp for lat, temp in local.items()},
         }
 
@@ -708,7 +693,7 @@ class ExoplanetOrbitApp:
         radius = int((15 if selected else 8) * PLANET_DISPLAY_SCALE)
         band_step = max(1, int(radius / 8))
         sub_lat = state["sub_lat"]
-        global_c = state["global_c"]
+        global_k = state["global_k"]
 
         for pixel_y in range(int(py - radius), int(py + radius) + 1, band_step):
             dy = pixel_y - py
@@ -716,7 +701,7 @@ class ExoplanetOrbitApp:
                 continue
             chord = math.sqrt(max(radius ** 2 - dy ** 2, 0.0))
             latitude = 90.0 * (dy / radius)
-            temp = local_temperature_c(global_c, latitude, sub_lat)
+            temp = local_temperature_c(global_k, latitude, sub_lat)
             colour = temperature_to_color(temp, self.temp_min, self.temp_max)
             self.canvas.create_line(px - chord, pixel_y, px + chord, pixel_y, fill=colour, width=band_step)
 
@@ -767,19 +752,15 @@ class ExoplanetOrbitApp:
             for planet in self.planets
         }
 
-        # Draw non-selected orbits faintly.
-        for planet in self.planets:
-            if planet.menu_index == self.selected.menu_index:
-                continue
-            self.draw_orbit(planet, eccentricities[planet.menu_index], "#4b617d", 1, (4, 7))
+        # Draw a thin grey dashed semi-major-axis guide.
+        selected_e = eccentricities[self.selected.menu_index]
+        centre_x = -self.selected.semi_major_axis_au * selected_e
+        peri_x = self.selected.semi_major_axis_au * (1.0 - selected_e)
+        x1, y1 = self.transform(centre_x, 0.0)
+        x2, y2 = self.transform(peri_x, 0.0)
+        self.canvas.create_line(x1, y1, x2, y2, fill="#8f98a8", dash=(3, 6), width=1)
 
-        # Draw selected min/max/current orbital envelopes.
-        if self.selected.has_varying_eccentricity:
-            self.draw_orbit(self.selected, self.selected.eccentricity_min, "#9abfff", 1, (2, 8))
-            self.draw_orbit(self.selected, self.selected.eccentricity_max, "#ff8d8d", 1, (9, 5))
-            self.draw_orbit_limit_labels(self.selected)
-
-        self.draw_orbit(self.selected, eccentricities[self.selected.menu_index], "#f4f8ff", 3, (8, 6))
+        self.draw_orbit(self.selected, selected_e, "#f4f8ff", 3, (8, 6))
 
         # Draw fixed host star.
         sx, sy = self.transform(0.0, 0.0)
@@ -817,7 +798,7 @@ class ExoplanetOrbitApp:
 
         selected_state = states[self.selected.menu_index]
         selected_e = eccentricities[self.selected.menu_index]
-        self.update_sidebar(elapsed, selected_orbit_count, selected_state, selected_e)
+        self.update_sidebar(selected_state, selected_e)
 
         self.canvas.create_text(
             22,
@@ -830,7 +811,7 @@ class ExoplanetOrbitApp:
         self.canvas.create_text(
             22,
             45,
-            text="Selected planet completes one visible orbit every few seconds. Star fixed at focus. Temperature responds to changing distance.",
+            text="Bingus",
             fill="#9fb5d1",
             font=("Arial", 10),
             anchor="w",
@@ -838,43 +819,22 @@ class ExoplanetOrbitApp:
 
     def update_sidebar(
         self,
-        elapsed: float,
-        selected_orbit_count: float,
         state: dict[str, float],
         selected_e: float,
     ) -> None:
         self.metrics["Selected planet"].config(text=f"{self.selected.name}  [choice {self.selected.menu_index}]")
         self.metrics["Host star"].config(text=self.selected.host)
-        self.metrics["Real orbital period"].config(text=f"{self.selected.period_days:,.4f} days")
-        self.metrics["Animation scale"].config(text=f"1 orbit = {self.orbit_seconds:.2f} real seconds")
-        self.metrics["Elapsed real time"].config(text=f"{elapsed:.1f} s")
-        self.metrics["Simulated orbit count"].config(text=f"{selected_orbit_count:,.2f} selected-planet orbits")
+        self.metrics["Orbital period"].config(text=f"{self.selected.period_days / DAYS_PER_YEAR:,.6f} years")
         self.metrics["Semi-major axis"].config(text=f"{self.selected.semi_major_axis_au:.6f} AU")
-        self.metrics["Eccentricity now"].config(text=f"{selected_e:.6f}")
-        self.metrics["Eccentricity limits"].config(
-            text=f"{self.selected.eccentricity_min:.6f} to {self.selected.eccentricity_max:.6f}"
-        )
+        self.metrics["Eccentricity"].config(text=f"{selected_e:.6f}")
         self.metrics["Current periapsis"].config(text=f"{state['peri_au']:.6f} AU")
         self.metrics["Current apoapsis"].config(text=f"{state['apo_au']:.6f} AU")
         self.metrics["Current distance"].config(text=f"{state['r']:.6f} AU")
         self.metrics["Orbital speed"].config(text=f"{state['speed'] / 1000.0:.3f} km/s")
-        self.metrics["Global temp"].config(text=f"{state['global_c']:.2f} °C")
-        self.metrics["Periapsis temp"].config(text=f"{state['peri_temp_c']:.2f} °C")
-        self.metrics["Apoapsis temp"].config(text=f"{state['apo_temp_c']:.2f} °C")
-        self.metrics["Substellar latitude"].config(text=f"{state['sub_lat']:.2f}°")
-        self.metrics["North pole temp"].config(text=f"{state['north_pole_c']:.2f} °C")
-        self.metrics["Equator temp"].config(text=f"{state['equator_c']:.2f} °C")
-        self.metrics["South pole temp"].config(text=f"{state['south_pole_c']:.2f} °C")
-
-        if self.finished:
-            status = "Finished"
-        elif self.paused:
-            status = "Paused"
-        elif self.duration_seconds > 0:
-            status = f"Running: {elapsed:.1f} / {self.duration_seconds:.0f} s"
-        else:
-            status = "Running continuously"
-        self.metrics["Animation status"].config(text=status)
+        self.metrics["Global temp"].config(text=f"{state['global_k']:.2f} K")
+        self.metrics["North pole temp"].config(text=f"{state['north_pole_k']:.2f} K")
+        self.metrics["Equator temp"].config(text=f"{state['equator_k']:.2f} K")
+        self.metrics["South pole temp"].config(text=f"{state['south_pole_k']:.2f} K")
 
     def _tick(self) -> None:
         if self.paused:
@@ -1044,4 +1004,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
