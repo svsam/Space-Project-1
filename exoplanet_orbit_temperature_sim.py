@@ -1,39 +1,3 @@
-"""
-Exoplanet orbit and temperature animation.
-
-This program reads an optional CSV of exoplanet data, lets you choose a planet
-from a terminal menu using numbers from 1 to n, then animates the orbit and
-records idealised temperatures.
-
-If no CSV file is supplied, or if the CSV cannot be used, the program uses
-Earth orbiting the Sun.
-
-New behaviour:
-    - the host star is fixed at the centre/focus of the orbit
-    - the selected planet completes one visible revolution every 60 seconds by default
-    - the animation can run continuously instead of stopping at 10,000 years
-    - if eccentricity limits are available, eccentricity oscillates between
-      the lower and upper limits every 30 seconds
-    - the current, minimum, and maximum orbit envelopes are drawn
-    - the sidebar shows the real orbital values and the changing temperature
-
-Run examples:
-    python exoplanet_orbit_temperature_sim.py
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12
-        python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --orbit-seconds 60
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --duration 60
-
-Expected useful CSV columns:
-    pl_name, hostname, pl_orbper, pl_orbsmax, st_mass, st_lum or st_lum_solar,
-    pl_bmasse, pl_bmassj, eccentricity_for_analysis, expected_eccentricity,
-    pl_orbeccen, pl_orbeccenerr1, pl_orbeccenerr2
-
-Optional eccentricity-limit columns, if you create them yourself:
-    eccentricity_min, eccentricity_max
-    e_min, e_max
-"""
-
 from __future__ import annotations
 
 import argparse
