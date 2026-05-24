@@ -1,21 +1,19 @@
 """
 Exoplanet orbit and temperature animation.
 
-Reads a CSV created from NASA Exoplanet Archive data, lets you choose a planet
-by row number, then animates that planet's host system for 60 seconds while
-compressing 10,000 simulated years into that minute.
+This program reads an optional CSV of exoplanet data, lets you choose a planet
+from a terminal menu using numbers from 1 to n, then animates the orbit and
+records idealised temperatures.
 
-Default behaviour:
-    - choose one row from the CSV
-    - find all planets in the CSV with the same host star
-    - animate all of those planets around the host star
-    - display global equilibrium temperature and latitude-band temperatures
+If no CSV file is supplied, or if you choose the built-in fallback, the program
+uses Earth orbiting the Sun.
 
 Run examples:
+    python exoplanet_orbit_temperature_sim.py
     python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --row 12
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --row 12 --single
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --row 12 --years 10000 --duration 60
+    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12
+    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --single
+    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --years 10000 --duration 60
 
 Expected useful CSV columns:
     pl_name, hostname, pl_orbper, pl_orbsmax, st_mass, st_lum or st_lum_solar,
@@ -60,10 +58,6 @@ FPS_MS = 33
 ORBIT_POINTS = 360
 LATITUDE_BANDS = [-90, -60, -30, 0, 30, 60, 90]
 
-# Real host-star reflex motion is usually too small to see. This exaggerates
-# the star wobble visually without changing the planet temperature calculations.
-STAR_WOBBLE_VISUAL_EXAGGERATION = 80.0
-
 
 # ------------------------------------------------------------
 # Data structures
@@ -72,6 +66,7 @@ STAR_WOBBLE_VISUAL_EXAGGERATION = 80.0
 @dataclass
 class Exoplanet:
     row_index: int
+    menu_index: int
     name: str
     host: str
     period_days: float
@@ -98,6 +93,27 @@ class Exoplanet:
     @property
     def mu(self) -> float:
         return G * (self.host_mass_kg + self.planet_mass_kg)
+
+
+# ------------------------------------------------------------
+# Built-in Earth/Sun fallback
+# ------------------------------------------------------------
+
+def earth_sun_planet() -> Exoplanet:
+    return Exoplanet(
+        row_index=-1,
+        menu_index=1,
+        name="Earth",
+        host="Sun",
+        period_days=365.25,
+        semi_major_axis_au=1.0,
+        eccentricity=0.0167,
+        planet_mass_earth=1.0,
+        host_mass_solar=1.0,
+        host_luminosity_solar=1.0,
+        albedo=0.30,
+        axial_tilt_deg=23.44,
+    )
 
 
 # ------------------------------------------------------------
@@ -137,7 +153,6 @@ def host_luminosity_from_row(row: dict[str, str]) -> float:
     if math.isfinite(st_lum_log):
         return 10.0 ** st_lum_log
 
-    # Fallback if luminosity is missing: assume solar luminosity.
     return 1.0
 
 
@@ -167,7 +182,6 @@ def planet_mass_from_row(row: dict[str, str]) -> float:
     if math.isfinite(mass_jupiter) and mass_jupiter > 0:
         return mass_jupiter * M_JUPITER_EARTH
 
-    # Fallback: Earth mass. This mainly affects star wobble, not temperature.
     return 1.0
 
 
@@ -195,7 +209,12 @@ def a_from_period_if_missing(period_days: float, host_mass_solar: float) -> floa
     return (host_mass_solar * period_years ** 2) ** (1.0 / 3.0)
 
 
-def row_to_exoplanet(row: dict[str, str], row_index: int, forced_tilt_deg: float | None) -> Exoplanet | None:
+def row_to_exoplanet(
+    row: dict[str, str],
+    row_index: int,
+    menu_index: int,
+    forced_tilt_deg: float | None,
+) -> Exoplanet | None:
     name = (row.get("pl_name") or row.get("planet") or f"row_{row_index}").strip()
     host = (row.get("hostname") or row.get("host_star") or "Unknown host").strip()
 
@@ -229,6 +248,7 @@ def row_to_exoplanet(row: dict[str, str], row_index: int, forced_tilt_deg: float
 
     return Exoplanet(
         row_index=row_index,
+        menu_index=menu_index,
         name=name,
         host=host,
         period_days=period_days,
@@ -246,20 +266,22 @@ def load_planets(csv_path: Path, forced_tilt_deg: float | None) -> list[Exoplane
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         planets = []
-        for index, row in enumerate(reader):
-            planet = row_to_exoplanet(row, index, forced_tilt_deg)
+        menu_index = 1
+        for row_index, row in enumerate(reader):
+            planet = row_to_exoplanet(row, row_index, menu_index, forced_tilt_deg)
             if planet is not None:
                 planets.append(planet)
+                menu_index += 1
     return planets
 
 
-def print_planet_preview(planets: list[Exoplanet], limit: int = 40) -> None:
-    print("\nAvailable planets, using Python/CSV data row index:")
-    print("index | planet | host | P / days | a / AU | e")
-    print("-" * 90)
+def print_planet_menu(planets: list[Exoplanet], limit: int = 80) -> None:
+    print("\nChoose a planet:")
+    print("number | planet | host | P / days | a / AU | e")
+    print("-" * 92)
     for planet in planets[:limit]:
         print(
-            f"{planet.row_index:5d} | "
+            f"{planet.menu_index:6d} | "
             f"{planet.name[:24]:24s} | "
             f"{planet.host[:20]:20s} | "
             f"{planet.period_days:9.3f} | "
@@ -267,7 +289,8 @@ def print_planet_preview(planets: list[Exoplanet], limit: int = 40) -> None:
             f"{planet.eccentricity:5.3f}"
         )
     if len(planets) > limit:
-        print(f"... {len(planets) - limit} more rows not shown. Use --row N to choose one directly.\n")
+        print(f"... {len(planets) - limit} more not shown. Use --choice N to choose one directly.")
+    print()
 
 
 # ------------------------------------------------------------
@@ -295,7 +318,7 @@ def true_anomaly_from_time(time_days: float, planet: Exoplanet) -> float:
 
 def relative_position_au(planet: Exoplanet, true_anomaly: float) -> tuple[float, float, float]:
     """
-    Returns the relative planet-star vector in AU, with the host star at one focus.
+    Returns the planet position relative to a stationary host star at one focus.
     """
     e = planet.eccentricity
     a = planet.semi_major_axis_au
@@ -336,7 +359,7 @@ def local_temperature_c(global_temp_c: float, latitude_deg: float, substellar_la
     """
     Educational regional-temperature approximation.
 
-    It is not a full atmospheric model. It shifts the warmest band toward the
+    This is not a full atmospheric model. It shifts the warmest band toward the
     substellar latitude and cools polar regions.
     """
     angular_distance = abs(latitude_deg - substellar_lat_deg)
@@ -431,10 +454,10 @@ class ExoplanetOrbitApp:
         title.pack(anchor="w", padx=20, pady=(20, 8))
 
         description = (
-            "The selected CSV row chooses the host system. The animation compresses "
-            f"{self.simulated_years:,.0f} simulated years into "
-            f"{self.duration_seconds:.0f} seconds. Temperatures use an idealised "
-            "radiative-equilibrium model."
+            "The chosen planet is selected from the terminal menu. The host star "
+            "is assumed to remain stationary at the centre of the system. The "
+            f"animation compresses {self.simulated_years:,.0f} simulated years "
+            f"into {self.duration_seconds:.0f} seconds."
         )
         tk.Label(
             self.sidebar,
@@ -466,8 +489,8 @@ class ExoplanetOrbitApp:
         legend_text = (
             "Space: pause/resume\n"
             "Esc: quit\n\n"
-            "The host star is drawn near the barycentre. Its visual wobble is "
-            "exaggerated so that the two-body motion can be seen."
+            "The star is fixed at the centre. This is a deliberate approximation "
+            "because the host-star motion is usually much smaller than the planet's orbit."
         )
         tk.Label(
             self.sidebar,
@@ -575,29 +598,10 @@ class ExoplanetOrbitApp:
             **{f"lat_{lat}": temp for lat, temp in local.items()},
         }
 
-    def star_reflex_position(self, states: dict[str, dict[str, float]]) -> tuple[float, float]:
-        """
-        Approximate host-star reflex motion from all displayed planets.
-        This is visually exaggerated after being computed.
-        """
-        host_mass_earth = self.selected.host_mass_kg / M_EARTH_KG
-        if host_mass_earth <= 0:
-            return 0.0, 0.0
-
-        sx = 0.0
-        sy = 0.0
-        for planet in self.planets:
-            state = states[planet.name]
-            mass_ratio = planet.planet_mass_earth / host_mass_earth
-            sx -= mass_ratio * state["x"]
-            sy -= mass_ratio * state["y"]
-
-        return sx * STAR_WOBBLE_VISUAL_EXAGGERATION, sy * STAR_WOBBLE_VISUAL_EXAGGERATION
-
-    def draw_orbit(self, planet: Exoplanet, star_x: float, star_y: float, selected: bool) -> None:
+    def draw_orbit(self, planet: Exoplanet, selected: bool) -> None:
         points: list[float] = []
         for x, y in self.orbit_points(planet):
-            px, py = self.transform(star_x + x, star_y + y)
+            px, py = self.transform(x, y)
             points.extend([px, py])
         color = "#d6e7ff" if selected else "#4b617d"
         width = 3 if selected else 1
@@ -635,23 +639,19 @@ class ExoplanetOrbitApp:
         elapsed, sim_year, sim_days = self.simulated_time()
 
         states = {planet.name: self.planet_state(planet, sim_days) for planet in self.planets}
-        star_x_au, star_y_au = self.star_reflex_position(states)
 
-        # Draw orbits first.
         for planet in self.planets:
-            self.draw_orbit(planet, star_x_au, star_y_au, planet.row_index == self.selected.row_index)
+            self.draw_orbit(planet, planet.menu_index == self.selected.menu_index)
 
-        # Draw host star.
-        sx, sy = self.transform(star_x_au, star_y_au)
+        sx, sy = self.transform(0.0, 0.0)
         self.canvas.create_oval(sx - 18, sy - 18, sx + 18, sy + 18, fill="#ffca45", outline="")
         self.canvas.create_oval(sx - 7, sy - 7, sx + 7, sy + 7, fill="#fff2a6", outline="")
         self.canvas.create_text(sx, sy + 31, text=self.selected.host, fill="#ffe9a8", font=("Arial", 10, "bold"))
 
-        # Draw planets.
         for planet in self.planets:
             state = states[planet.name]
-            selected = planet.row_index == self.selected.row_index
-            px, py = self.transform(star_x_au + state["x"], star_y_au + state["y"])
+            selected = planet.menu_index == self.selected.menu_index
+            px, py = self.transform(state["x"], state["y"])
             self.draw_planet_disc(planet, state, px, py, selected)
 
         selected_state = states[self.selected.name]
@@ -668,14 +668,14 @@ class ExoplanetOrbitApp:
         self.canvas.create_text(
             22,
             45,
-            text="Dashed curves: Keplerian orbits. Planet colours: idealised latitude-band temperatures.",
+            text="Dashed curves: Keplerian orbits. Star fixed at one focus. Planet colours: idealised latitude-band temperatures.",
             fill="#9fb5d1",
             font=("Arial", 10),
             anchor="w",
         )
 
     def update_sidebar(self, elapsed: float, sim_year: float, state: dict[str, float]) -> None:
-        self.metrics["Selected planet"].config(text=f"{self.selected.name}  [row {self.selected.row_index}]")
+        self.metrics["Selected planet"].config(text=f"{self.selected.name}  [choice {self.selected.menu_index}]")
         self.metrics["Host star"].config(text=self.selected.host)
         self.metrics["Simulated year"].config(text=f"{sim_year:,.1f} / {self.simulated_years:,.0f}")
         self.metrics["Orbital period"].config(text=f"{self.selected.period_days:,.4f} days")
@@ -719,45 +719,75 @@ class ExoplanetOrbitApp:
 # Main program
 # ------------------------------------------------------------
 
-def choose_selected_planet(planets: list[Exoplanet], requested_row: int | None) -> Exoplanet:
-    by_row = {planet.row_index: planet for planet in planets}
+def choose_selected_planet(planets: list[Exoplanet], requested_choice: int | None) -> Exoplanet:
+    by_choice = {planet.menu_index: planet for planet in planets}
 
-    if requested_row is not None:
-        if requested_row not in by_row:
-            raise ValueError(f"Row {requested_row} was not found or did not contain enough orbital data.")
-        return by_row[requested_row]
+    if requested_choice is not None:
+        if requested_choice not in by_choice:
+            raise ValueError(f"Choice {requested_choice} was not found. Choose a number from 1 to {len(planets)}.")
+        return by_choice[requested_choice]
 
-    print_planet_preview(planets)
+    if len(planets) == 1 and planets[0].name == "Earth" and planets[0].host == "Sun":
+        print("No exoplanet CSV was supplied, so the program will use Earth orbiting the Sun.")
+        return planets[0]
+
+    print_planet_menu(planets)
     while True:
-        raw = input("Enter the CSV/Python row index of the planet to simulate: ").strip()
+        raw = input(f"Enter a planet number from 1 to {len(planets)}: ").strip()
         try:
-            row_index = int(raw)
+            choice = int(raw)
         except ValueError:
-            print("Please enter an integer row index.")
+            print("Please enter an integer.")
             continue
-        if row_index in by_row:
-            return by_row[row_index]
-        print("That row was not found. Try again.")
+        if choice in by_choice:
+            return by_choice[choice]
+        print(f"That choice was not found. Enter a number from 1 to {len(planets)}.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Animate exoplanet orbital temperature from a CSV file.")
-    parser.add_argument("csv_file", type=Path, help="CSV file containing exoplanet data")
-    parser.add_argument("--row", type=int, default=None, help="CSV/Python row index to choose")
+    parser.add_argument(
+        "csv_file",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Optional CSV file containing exoplanet data. If omitted, Earth/Sun is used.",
+    )
+    parser.add_argument(
+        "--choice",
+        type=int,
+        default=None,
+        help="Planet menu number to choose directly. This is 1 to n, not the CSV row index.",
+    )
+    parser.add_argument(
+        "--row",
+        type=int,
+        default=None,
+        help="Deprecated alias for --choice. Use --choice instead.",
+    )
     parser.add_argument("--single", action="store_true", help="Animate only the selected planet, not the full host system")
     parser.add_argument("--years", type=float, default=10_000.0, help="Simulated years covered by the animation")
     parser.add_argument("--duration", type=float, default=60.0, help="Real seconds the animation should run")
     parser.add_argument("--tilt", type=float, default=None, help="Override axial tilt in degrees for all planets")
     args = parser.parse_args()
 
-    if not args.csv_file.exists():
-        raise FileNotFoundError(f"Could not find CSV file: {args.csv_file}")
+    requested_choice = args.choice if args.choice is not None else args.row
 
-    planets = load_planets(args.csv_file, forced_tilt_deg=args.tilt)
-    if not planets:
-        raise ValueError("No usable planets were loaded. Check that the CSV has period/semi-major-axis data.")
+    if args.csv_file is None:
+        planets = [earth_sun_planet()]
+    else:
+        if not args.csv_file.exists():
+            print(f"Could not find CSV file: {args.csv_file}")
+            print("Using the built-in Earth/Sun fallback instead.")
+            planets = [earth_sun_planet()]
+        else:
+            planets = load_planets(args.csv_file, forced_tilt_deg=args.tilt)
+            if not planets:
+                print("No usable exoplanets were loaded from the CSV.")
+                print("Using the built-in Earth/Sun fallback instead.")
+                planets = [earth_sun_planet()]
 
-    selected = choose_selected_planet(planets, args.row)
+    selected = choose_selected_planet(planets, requested_choice)
 
     if args.single:
         displayed_planets = [selected]
@@ -768,7 +798,8 @@ def main() -> None:
 
     print(f"\nSelected: {selected.name} around {selected.host}")
     print(f"Animating {len(displayed_planets)} planet(s) for {args.duration:.0f} seconds.")
-    print(f"Simulation span: {args.years:,.0f} years.\n")
+    print(f"Simulation span: {args.years:,.0f} years.")
+    print("The host star is fixed at the centre of the animation.\n")
 
     app = ExoplanetOrbitApp(
         planets=displayed_planets,
