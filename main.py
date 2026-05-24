@@ -18,7 +18,6 @@ planets = NasaExoplanetArchive.query_criteria(
             pl_orbeccenerr1,
             pl_orbeccenerr2,
             pl_orbeccenlim,
-            pl_orbeccen_reflink,
             
             st_mass,
             st_lum,
