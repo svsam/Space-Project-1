@@ -5,20 +5,33 @@ This program reads an optional CSV of exoplanet data, lets you choose a planet
 from a terminal menu using numbers from 1 to n, then animates the orbit and
 records idealised temperatures.
 
-If no CSV file is supplied, or if you choose the built-in fallback, the program
-uses Earth orbiting the Sun.
+If no CSV file is supplied, or if the CSV cannot be used, the program uses
+Earth orbiting the Sun.
+
+New behaviour:
+    - the host star is fixed at the centre/focus of the orbit
+    - the selected planet completes one visible revolution every 60 seconds by default
+    - the animation can run continuously instead of stopping at 10,000 years
+    - if eccentricity limits are available, eccentricity oscillates between
+      the lower and upper limits every 30 seconds
+    - the current, minimum, and maximum orbit envelopes are drawn
+    - the sidebar shows the real orbital values and the changing temperature
 
 Run examples:
     python exoplanet_orbit_temperature_sim.py
     python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv
     python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --single
-    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --years 10000 --duration 60
+        python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --orbit-seconds 60
+    python exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice 12 --duration 60
 
 Expected useful CSV columns:
     pl_name, hostname, pl_orbper, pl_orbsmax, st_mass, st_lum or st_lum_solar,
     pl_bmasse, pl_bmassj, eccentricity_for_analysis, expected_eccentricity,
-    pl_orbeccen
+    pl_orbeccen, pl_orbeccenerr1, pl_orbeccenerr2
+
+Optional eccentricity-limit columns, if you create them yourself:
+    eccentricity_min, eccentricity_max
+    e_min, e_max
 """
 
 from __future__ import annotations
@@ -33,10 +46,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-# ------------------------------------------------------------
 # Physical constants
-# ------------------------------------------------------------
-
 G = 6.67430e-11
 AU_M = 1.495978707e11
 M_SUN_KG = 1.98847e30
@@ -46,23 +56,18 @@ L_SUN_W = 3.828e26
 SIGMA = 5.670374419e-8
 DAYS_PER_YEAR = 365.25
 
-
-# ------------------------------------------------------------
 # Display constants
-# ------------------------------------------------------------
-
-WINDOW_WIDTH = 1280
-WINDOW_HEIGHT = 780
-SIDEBAR_WIDTH = 370
+WINDOW_WIDTH = 1320
+WINDOW_HEIGHT = 820
+SIDEBAR_WIDTH = 420
 FPS_MS = 33
-ORBIT_POINTS = 360
+ORBIT_POINTS = 420
 LATITUDE_BANDS = [-90, -60, -30, 0, 30, 60, 90]
+PLANET_DISPLAY_SCALE = 1.5
+STAR_DISPLAY_SCALE = 2.0
 
 
-# ------------------------------------------------------------
 # Data structures
-# ------------------------------------------------------------
-
 @dataclass
 class Exoplanet:
     row_index: int
@@ -72,6 +77,8 @@ class Exoplanet:
     period_days: float
     semi_major_axis_au: float
     eccentricity: float
+    eccentricity_min: float
+    eccentricity_max: float
     planet_mass_earth: float
     host_mass_solar: float
     host_luminosity_solar: float
@@ -94,12 +101,19 @@ class Exoplanet:
     def mu(self) -> float:
         return G * (self.host_mass_kg + self.planet_mass_kg)
 
+    @property
+    def has_varying_eccentricity(self) -> bool:
+        return abs(self.eccentricity_max - self.eccentricity_min) > 1e-6
 
-# ------------------------------------------------------------
 # Built-in Earth/Sun fallback
-# ------------------------------------------------------------
-
 def earth_sun_planet() -> Exoplanet:
+    """
+    Built-in Earth/Sun example.
+
+    Earth's eccentricity is not constant over geological time. It varies roughly
+    between about 0.005 and 0.058 due to Milankovitch cycles. The animation uses
+    those bounds but compresses the variation into a 30-second visual cycle.
+    """
     return Exoplanet(
         row_index=-1,
         menu_index=1,
@@ -108,6 +122,8 @@ def earth_sun_planet() -> Exoplanet:
         period_days=365.25,
         semi_major_axis_au=1.0,
         eccentricity=0.0167,
+        eccentricity_min=0.005,
+        eccentricity_max=0.058,
         planet_mass_earth=1.0,
         host_mass_solar=1.0,
         host_luminosity_solar=1.0,
@@ -115,11 +131,7 @@ def earth_sun_planet() -> Exoplanet:
         axial_tilt_deg=23.44,
     )
 
-
-# ------------------------------------------------------------
 # CSV loading and cleaning
-# ------------------------------------------------------------
-
 def parse_float(value: object, default: float = math.nan) -> float:
     if value is None:
         return default
@@ -131,6 +143,10 @@ def parse_float(value: object, default: float = math.nan) -> float:
     except ValueError:
         return default
 
+def clamp_eccentricity(e: float) -> float:
+    if not math.isfinite(e):
+        return 0.0
+    return min(max(e, 0.0), 0.95)
 
 def first_valid_float(row: dict[str, str], names: list[str], default: float = math.nan) -> float:
     for name in names:
@@ -138,7 +154,6 @@ def first_valid_float(row: dict[str, str], names: list[str], default: float = ma
         if math.isfinite(value):
             return value
     return default
-
 
 def host_luminosity_from_row(row: dict[str, str]) -> float:
     """
@@ -155,7 +170,6 @@ def host_luminosity_from_row(row: dict[str, str]) -> float:
 
     return 1.0
 
-
 def eccentricity_from_row(row: dict[str, str]) -> float:
     """
     Prefer the column made by the statistical eccentricity program.
@@ -166,12 +180,50 @@ def eccentricity_from_row(row: dict[str, str]) -> float:
         ["eccentricity_for_analysis", "expected_eccentricity", "pl_orbeccen"],
         default=0.0,
     )
+    return clamp_eccentricity(eccentricity)
 
-    if not math.isfinite(eccentricity):
-        return 0.0
+def eccentricity_limits_from_row(row: dict[str, str], base_e: float) -> tuple[float, float]:
+    """
+    Uses explicit e_min/e_max columns if available.
 
-    return min(max(eccentricity, 0.0), 0.95)
+    If those do not exist, uses NASA-style uncertainty columns if they are
+    present. In the NASA archive, lower uncertainties are often stored as
+    negative values, so both signs are handled.
 
+    If no limits exist, returns a static range: (base_e, base_e).
+    """
+    explicit_min = first_valid_float(
+        row,
+        ["eccentricity_min", "e_min", "pl_orbeccen_min"],
+        default=math.nan,
+    )
+    explicit_max = first_valid_float(
+        row,
+        ["eccentricity_max", "e_max", "pl_orbeccen_max"],
+        default=math.nan,
+    )
+
+    if math.isfinite(explicit_min) and math.isfinite(explicit_max):
+        e_min = clamp_eccentricity(explicit_min)
+        e_max = clamp_eccentricity(explicit_max)
+        return min(e_min, e_max), max(e_min, e_max)
+
+    err1 = parse_float(row.get("pl_orbeccenerr1"), math.nan)
+    err2 = parse_float(row.get("pl_orbeccenerr2"), math.nan)
+
+    candidates = [base_e]
+    if math.isfinite(err1):
+        candidates.append(base_e + abs(err1))
+    if math.isfinite(err2):
+        # err2 is commonly negative. abs(err2) also handles positive lower errors.
+        candidates.append(base_e - abs(err2))
+
+    candidates = [clamp_eccentricity(value) for value in candidates if math.isfinite(value)]
+
+    if len(candidates) >= 2:
+        return min(candidates), max(candidates)
+
+    return base_e, base_e
 
 def planet_mass_from_row(row: dict[str, str]) -> float:
     mass_earth = first_valid_float(row, ["planet_mass_earth", "pl_bmasse"], math.nan)
@@ -184,7 +236,6 @@ def planet_mass_from_row(row: dict[str, str]) -> float:
 
     return 1.0
 
-
 def period_from_a_if_missing(semi_major_axis_au: float, host_mass_solar: float) -> float:
     """
     Kepler's third law in Solar-system units:
@@ -196,7 +247,6 @@ def period_from_a_if_missing(semi_major_axis_au: float, host_mass_solar: float) 
     period_years = math.sqrt(semi_major_axis_au ** 3 / host_mass_solar)
     return period_years * DAYS_PER_YEAR
 
-
 def a_from_period_if_missing(period_days: float, host_mass_solar: float) -> float:
     """
     Rearranged Kepler's third law:
@@ -207,7 +257,6 @@ def a_from_period_if_missing(period_days: float, host_mass_solar: float) -> floa
         return math.nan
     period_years = period_days / DAYS_PER_YEAR
     return (host_mass_solar * period_years ** 2) ** (1.0 / 3.0)
-
 
 def row_to_exoplanet(
     row: dict[str, str],
@@ -246,6 +295,9 @@ def row_to_exoplanet(
     if not math.isfinite(axial_tilt_deg):
         axial_tilt_deg = 0.0
 
+    base_e = eccentricity_from_row(row)
+    e_min, e_max = eccentricity_limits_from_row(row, base_e)
+
     return Exoplanet(
         row_index=row_index,
         menu_index=menu_index,
@@ -253,14 +305,15 @@ def row_to_exoplanet(
         host=host,
         period_days=period_days,
         semi_major_axis_au=semi_major_axis_au,
-        eccentricity=eccentricity_from_row(row),
+        eccentricity=base_e,
+        eccentricity_min=e_min,
+        eccentricity_max=e_max,
         planet_mass_earth=planet_mass_from_row(row),
         host_mass_solar=host_mass_solar,
         host_luminosity_solar=host_luminosity_from_row(row),
         albedo=first_valid_float(row, ["albedo", "planet_albedo"], 0.30),
         axial_tilt_deg=axial_tilt_deg,
     )
-
 
 def load_planets(csv_path: Path, forced_tilt_deg: float | None) -> list[Exoplanet]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
@@ -274,29 +327,28 @@ def load_planets(csv_path: Path, forced_tilt_deg: float | None) -> list[Exoplane
                 menu_index += 1
     return planets
 
-
 def print_planet_menu(planets: list[Exoplanet], limit: int = 80) -> None:
     print("\nChoose a planet:")
     print("number | planet | host | P / days | a / AU | e")
     print("-" * 92)
     for planet in planets[:limit]:
+        if planet.has_varying_eccentricity:
+            e_text = f"{planet.eccentricity_min:.3f}-{planet.eccentricity_max:.3f}"
+        else:
+            e_text = f"{planet.eccentricity:.3f}"
         print(
             f"{planet.menu_index:6d} | "
             f"{planet.name[:24]:24s} | "
             f"{planet.host[:20]:20s} | "
             f"{planet.period_days:9.3f} | "
             f"{planet.semi_major_axis_au:7.4f} | "
-            f"{planet.eccentricity:5.3f}"
+            f"{e_text:>11s}"
         )
     if len(planets) > limit:
         print(f"... {len(planets) - limit} more not shown. Use --choice N to choose one directly.")
     print()
 
-
-# ------------------------------------------------------------
 # Orbital mechanics
-# ------------------------------------------------------------
-
 def solve_kepler(mean_anomaly: float, eccentricity: float, iterations: int = 12) -> float:
     E = mean_anomaly if eccentricity < 0.8 else math.pi
     for _ in range(iterations):
@@ -307,37 +359,39 @@ def solve_kepler(mean_anomaly: float, eccentricity: float, iterations: int = 12)
         E -= f / fp
     return E
 
-
-def true_anomaly_from_time(time_days: float, planet: Exoplanet) -> float:
+def true_anomaly_from_time(time_days: float, planet: Exoplanet, eccentricity: float) -> float:
     M = 2.0 * math.pi * ((time_days / planet.period_days) % 1.0)
-    E = solve_kepler(M, planet.eccentricity)
-    numerator = math.sqrt(1.0 + planet.eccentricity) * math.sin(E / 2.0)
-    denominator = math.sqrt(1.0 - planet.eccentricity) * math.cos(E / 2.0)
+    E = solve_kepler(M, eccentricity)
+    numerator = math.sqrt(1.0 + eccentricity) * math.sin(E / 2.0)
+    denominator = math.sqrt(1.0 - eccentricity) * math.cos(E / 2.0)
     return 2.0 * math.atan2(numerator, denominator)
 
-
-def relative_position_au(planet: Exoplanet, true_anomaly: float) -> tuple[float, float, float]:
+def relative_position_au(
+    planet: Exoplanet,
+    true_anomaly: float,
+    eccentricity: float,
+) -> tuple[float, float, float]:
     """
     Returns the planet position relative to a stationary host star at one focus.
     """
-    e = planet.eccentricity
     a = planet.semi_major_axis_au
-    r = a * (1.0 - e ** 2) / (1.0 + e * math.cos(true_anomaly))
+    r = a * (1.0 - eccentricity ** 2) / (1.0 + eccentricity * math.cos(true_anomaly))
     x = r * math.cos(true_anomaly)
     y = r * math.sin(true_anomaly)
     return x, y, r
-
 
 def orbital_speed_m_s(planet: Exoplanet, radius_au: float) -> float:
     r_m = radius_au * AU_M
     a_m = planet.semi_major_axis_au * AU_M
     return math.sqrt(planet.mu * (2.0 / r_m - 1.0 / a_m))
 
+def periapsis_au(planet: Exoplanet, eccentricity: float) -> float:
+    return planet.semi_major_axis_au * (1.0 - eccentricity)
 
-# ------------------------------------------------------------
+def apoapsis_au(planet: Exoplanet, eccentricity: float) -> float:
+    return planet.semi_major_axis_au * (1.0 + eccentricity)
+
 # Temperature model
-# ------------------------------------------------------------
-
 def global_equilibrium_temperature_k(planet: Exoplanet, radius_au: float) -> float:
     """
     Black-body equilibrium temperature with full surface redistribution:
@@ -346,14 +400,12 @@ def global_equilibrium_temperature_k(planet: Exoplanet, radius_au: float) -> flo
     r_m = radius_au * AU_M
     return ((planet.luminosity_w * (1.0 - planet.albedo)) / (16.0 * math.pi * SIGMA * r_m ** 2)) ** 0.25
 
-
 def substellar_latitude_deg(planet: Exoplanet, time_days: float) -> float:
     """
     Simple seasonal tilt model. If axial tilt is unavailable, this is zero.
     """
     orbital_phase = 2.0 * math.pi * ((time_days / planet.period_days) % 1.0)
     return planet.axial_tilt_deg * math.sin(orbital_phase)
-
 
 def local_temperature_c(global_temp_c: float, latitude_deg: float, substellar_lat_deg: float) -> float:
     """
@@ -366,7 +418,6 @@ def local_temperature_c(global_temp_c: float, latitude_deg: float, substellar_la
     seasonal_heating = 16.0 * max(math.cos(math.radians(angular_distance)), 0.0)
     polar_cooling = 13.0 * (abs(latitude_deg) / 90.0) ** 1.15
     return global_temp_c + seasonal_heating - polar_cooling
-
 
 def temperature_to_color(temp_c: float, min_c: float, max_c: float) -> str:
     """
@@ -389,23 +440,21 @@ def temperature_to_color(temp_c: float, min_c: float, max_c: float) -> str:
             return f"#{r:02x}{g:02x}{b:02x}"
     return "#d72d2d"
 
-
-# ------------------------------------------------------------
 # Tkinter animation engine
-# ------------------------------------------------------------
-
 class ExoplanetOrbitApp:
     def __init__(
         self,
         planets: list[Exoplanet],
         selected: Exoplanet,
-        simulated_years: float,
+        orbit_seconds: float,
+        eccentricity_cycle_seconds: float,
         duration_seconds: float,
     ) -> None:
         self.planets = planets
         self.selected = selected
-        self.simulated_years = simulated_years
-        self.duration_seconds = duration_seconds
+        self.orbit_seconds = max(orbit_seconds, 0.1)
+        self.eccentricity_cycle_seconds = max(eccentricity_cycle_seconds, 1.0)
+        self.duration_seconds = max(duration_seconds, 0.0)
         self.start_time = time.perf_counter()
         self.paused = False
         self.pause_started_at = 0.0
@@ -434,7 +483,8 @@ class ExoplanetOrbitApp:
         self._build_sidebar()
 
         self.max_extent_au = max(
-            p.semi_major_axis_au * (1.0 + p.eccentricity) for p in self.planets
+            p.semi_major_axis_au * (1.0 + max(p.eccentricity, p.eccentricity_max))
+            for p in self.planets
         )
         self.max_extent_au = max(self.max_extent_au, 0.01)
 
@@ -454,15 +504,13 @@ class ExoplanetOrbitApp:
         title.pack(anchor="w", padx=20, pady=(20, 8))
 
         description = (
-            "The chosen planet is selected from the terminal menu. The host star "
-            "is assumed to remain stationary at the centre of the system. The "
-            f"animation compresses {self.simulated_years:,.0f} simulated years "
-            f"into {self.duration_seconds:.0f} seconds."
+            f"{self.selected.host} is the host star. {self.selected.name} is the exoplanet being displayed.\n"
+            "If eccentricity limits exist, the eccentricity oscillates between them."
         )
         tk.Label(
             self.sidebar,
             text=description,
-            wraplength=320,
+            wraplength=360,
             justify="left",
             fg="#d9e8ff",
             bg="#0d1424",
@@ -471,13 +519,20 @@ class ExoplanetOrbitApp:
         for key in [
             "Selected planet",
             "Host star",
-            "Simulated year",
-            "Orbital period",
+            "Real orbital period",
+            "Animation scale",
+            "Elapsed real time",
+            "Simulated orbit count",
             "Semi-major axis",
-            "Eccentricity",
-            "Distance",
+            "Eccentricity now",
+            "Eccentricity limits",
+            "Current periapsis",
+            "Current apoapsis",
+            "Current distance",
             "Orbital speed",
             "Global temp",
+            "Periapsis temp",
+            "Apoapsis temp",
             "Substellar latitude",
             "North pole temp",
             "Equator temp",
@@ -489,13 +544,16 @@ class ExoplanetOrbitApp:
         legend_text = (
             "Space: pause/resume\n"
             "Esc: quit\n\n"
-            "The star is fixed at the centre. This is a deliberate approximation "
-            "because the host-star motion is usually much smaller than the planet's orbit."
+            "Orbit guide:\n"
+            "• bright dashed orbit = current eccentricity\n"
+            "• inner pale orbit = minimum eccentricity limit\n"
+            "• outer red orbit = maximum eccentricity limit\n\n"
+            "The local-temperature model is only a simplified latitude-band approximation."
         )
         tk.Label(
             self.sidebar,
             text=legend_text,
-            wraplength=320,
+            wraplength=360,
             justify="left",
             fg="#9fb5d1",
             bg="#0d1424",
@@ -503,33 +561,34 @@ class ExoplanetOrbitApp:
 
     def _add_metric_row(self, key: str) -> None:
         frame = tk.Frame(self.sidebar, bg="#172138")
-        frame.pack(fill=tk.X, padx=18, pady=5)
+        frame.pack(fill=tk.X, padx=18, pady=3)
         tk.Label(
             frame,
             text=key,
             fg="white",
             bg="#172138",
-            font=("Arial", 10, "bold"),
-        ).pack(anchor="w", padx=10, pady=(7, 0))
+            font=("Arial", 9, "bold"),
+        ).pack(anchor="w", padx=10, pady=(5, 0))
         value = tk.Label(
             frame,
             text="-",
             fg="#9fd3ff",
             bg="#172138",
-            font=("Consolas", 10),
+            font=("Consolas", 9),
         )
-        value.pack(anchor="w", padx=10, pady=(2, 7))
+        value.pack(anchor="w", padx=10, pady=(1, 5))
         self.metrics[key] = value
 
     def _estimate_temperature_range(self) -> tuple[float, float]:
         temps = []
         for planet in self.planets:
-            peri = planet.semi_major_axis_au * (1.0 - planet.eccentricity)
-            apo = planet.semi_major_axis_au * (1.0 + planet.eccentricity)
-            if peri > 0:
-                temps.append(global_equilibrium_temperature_k(planet, peri) - 273.15)
-            if apo > 0:
-                temps.append(global_equilibrium_temperature_k(planet, apo) - 273.15)
+            for e in [planet.eccentricity_min, planet.eccentricity, planet.eccentricity_max]:
+                peri = periapsis_au(planet, e)
+                apo = apoapsis_au(planet, e)
+                if peri > 0:
+                    temps.append(global_equilibrium_temperature_k(planet, peri) - 273.15)
+                if apo > 0:
+                    temps.append(global_equilibrium_temperature_k(planet, apo) - 273.15)
         if not temps:
             return -100.0, 100.0
         low = min(temps) - 30.0
@@ -554,12 +613,34 @@ class ExoplanetOrbitApp:
             return self.pause_started_at - self.start_time - self.total_pause_time
         return time.perf_counter() - self.start_time - self.total_pause_time
 
-    def simulated_time(self) -> tuple[float, float, float]:
-        elapsed = min(max(self.elapsed_real_seconds(), 0.0), self.duration_seconds)
-        fraction = elapsed / self.duration_seconds if self.duration_seconds > 0 else 1.0
-        sim_year = fraction * self.simulated_years
-        sim_days = sim_year * DAYS_PER_YEAR
-        return elapsed, sim_year, sim_days
+    def current_eccentricity(self, planet: Exoplanet, elapsed_seconds: float) -> float:
+        """
+        Oscillates between e_min and e_max if a range exists.
+
+        The oscillation is deliberately exaggerated in time for visual clarity:
+        e_min -> e_max -> e_min over eccentricity_cycle_seconds.
+        """
+        if not planet.has_varying_eccentricity:
+            return planet.eccentricity
+
+        midpoint = 0.5 * (planet.eccentricity_min + planet.eccentricity_max)
+        amplitude = 0.5 * (planet.eccentricity_max - planet.eccentricity_min)
+
+        # Starts at the lower limit, reaches the upper limit halfway through.
+        phase = 2.0 * math.pi * (elapsed_seconds / self.eccentricity_cycle_seconds) - math.pi / 2.0
+        return clamp_eccentricity(midpoint + amplitude * math.sin(phase))
+
+    def simulated_time(self, elapsed_seconds: float) -> tuple[float, float]:
+        """
+        Converts real animation time into simulated days.
+
+        The selected planet completes exactly one orbit every orbit_seconds.
+        Other planets in the same system move according to their real period
+        relative to the selected planet's simulated days.
+        """
+        selected_orbit_count = elapsed_seconds / self.orbit_seconds
+        sim_days = selected_orbit_count * self.selected.period_days
+        return selected_orbit_count, sim_days
 
     def transform(self, x_au: float, y_au: float) -> tuple[float, float]:
         width = max(self.canvas.winfo_width(), 1)
@@ -567,15 +648,15 @@ class ExoplanetOrbitApp:
         scale = 0.43 * min(width, height) / self.max_extent_au
         return width * 0.5 + x_au * scale, height * 0.5 - y_au * scale
 
-    def orbit_points(self, planet: Exoplanet) -> Iterable[tuple[float, float]]:
+    def orbit_points(self, planet: Exoplanet, eccentricity: float) -> Iterable[tuple[float, float]]:
         for i in range(ORBIT_POINTS + 1):
             nu = 2.0 * math.pi * i / ORBIT_POINTS
-            x, y, _ = relative_position_au(planet, nu)
+            x, y, _ = relative_position_au(planet, nu, eccentricity)
             yield x, y
 
-    def planet_state(self, planet: Exoplanet, sim_days: float) -> dict[str, float]:
-        nu = true_anomaly_from_time(sim_days, planet)
-        x, y, r = relative_position_au(planet, nu)
+    def planet_state(self, planet: Exoplanet, sim_days: float, eccentricity: float) -> dict[str, float]:
+        nu = true_anomaly_from_time(sim_days, planet, eccentricity)
+        x, y, r = relative_position_au(planet, nu, eccentricity)
         speed = orbital_speed_m_s(planet, r)
         global_k = global_equilibrium_temperature_k(planet, r)
         global_c = global_k - 273.15
@@ -584,6 +665,10 @@ class ExoplanetOrbitApp:
             lat: local_temperature_c(global_c, lat, sub_lat)
             for lat in LATITUDE_BANDS
         }
+        peri = periapsis_au(planet, eccentricity)
+        apo = apoapsis_au(planet, eccentricity)
+        peri_temp_c = global_equilibrium_temperature_k(planet, peri) - 273.15
+        apo_temp_c = global_equilibrium_temperature_k(planet, apo) - 273.15
         return {
             "nu": nu,
             "x": x,
@@ -595,21 +680,32 @@ class ExoplanetOrbitApp:
             "north_pole_c": local[90],
             "equator_c": local[0],
             "south_pole_c": local[-90],
+            "peri_au": peri,
+            "apo_au": apo,
+            "peri_temp_c": peri_temp_c,
+            "apo_temp_c": apo_temp_c,
             **{f"lat_{lat}": temp for lat, temp in local.items()},
         }
 
-    def draw_orbit(self, planet: Exoplanet, selected: bool) -> None:
+    def draw_orbit(
+        self,
+        planet: Exoplanet,
+        eccentricity: float,
+        colour: str,
+        width: int,
+        dash: tuple[int, int] | None,
+    ) -> None:
         points: list[float] = []
-        for x, y in self.orbit_points(planet):
+        for x, y in self.orbit_points(planet, eccentricity):
             px, py = self.transform(x, y)
             points.extend([px, py])
-        color = "#d6e7ff" if selected else "#4b617d"
-        width = 3 if selected else 1
-        dash = (7, 7) if selected else (4, 7)
-        self.canvas.create_line(*points, fill=color, dash=dash, width=width, smooth=True)
+        if dash is None:
+            self.canvas.create_line(*points, fill=colour, width=width, smooth=True)
+        else:
+            self.canvas.create_line(*points, fill=colour, dash=dash, width=width, smooth=True)
 
     def draw_planet_disc(self, planet: Exoplanet, state: dict[str, float], px: float, py: float, selected: bool) -> None:
-        radius = 15 if selected else 8
+        radius = int((15 if selected else 8) * PLANET_DISPLAY_SCALE)
         band_step = max(1, int(radius / 8))
         sub_lat = state["sub_lat"]
         global_c = state["global_c"]
@@ -621,8 +717,8 @@ class ExoplanetOrbitApp:
             chord = math.sqrt(max(radius ** 2 - dy ** 2, 0.0))
             latitude = 90.0 * (dy / radius)
             temp = local_temperature_c(global_c, latitude, sub_lat)
-            color = temperature_to_color(temp, self.temp_min, self.temp_max)
-            self.canvas.create_line(px - chord, pixel_y, px + chord, pixel_y, fill=color, width=band_step)
+            colour = temperature_to_color(temp, self.temp_min, self.temp_max)
+            self.canvas.create_line(px - chord, pixel_y, px + chord, pixel_y, fill=colour, width=band_step)
 
         outline = "#ffffff" if selected else "#c8d8ed"
         self.canvas.create_oval(px - radius, py - radius, px + radius, py + radius, outline=outline, width=2)
@@ -634,28 +730,94 @@ class ExoplanetOrbitApp:
             self.canvas.create_line(px - dx, py - dy, px + dx, py + dy, fill="#e8f3ff", width=2)
             self.canvas.create_text(px, py + radius + 13, text=planet.name, fill="#e8f3ff", font=("Arial", 9, "bold"))
 
+    def draw_orbit_limit_labels(self, planet: Exoplanet) -> None:
+        if not planet.has_varying_eccentricity:
+            return
+
+        min_apo_x, min_apo_y = self.transform(apoapsis_au(planet, planet.eccentricity_min), 0.0)
+        max_apo_x, max_apo_y = self.transform(apoapsis_au(planet, planet.eccentricity_max), 0.0)
+        self.canvas.create_text(
+            min_apo_x + 8,
+            min_apo_y - 12,
+            text="min e orbit",
+            fill="#b9d7ff",
+            font=("Arial", 9),
+            anchor="w",
+        )
+        self.canvas.create_text(
+            max_apo_x + 8,
+            max_apo_y + 12,
+            text="max e orbit",
+            fill="#ff9f9f",
+            font=("Arial", 9),
+            anchor="w",
+        )
+
     def draw_frame(self) -> None:
         self.canvas.delete("all")
-        elapsed, sim_year, sim_days = self.simulated_time()
+        elapsed = self.elapsed_real_seconds()
+        selected_orbit_count, sim_days = self.simulated_time(elapsed)
 
-        states = {planet.name: self.planet_state(planet, sim_days) for planet in self.planets}
+        eccentricities = {
+            planet.menu_index: self.current_eccentricity(planet, elapsed)
+            for planet in self.planets
+        }
+        states = {
+            planet.menu_index: self.planet_state(planet, sim_days, eccentricities[planet.menu_index])
+            for planet in self.planets
+        }
 
+        # Draw non-selected orbits faintly.
         for planet in self.planets:
-            self.draw_orbit(planet, planet.menu_index == self.selected.menu_index)
+            if planet.menu_index == self.selected.menu_index:
+                continue
+            self.draw_orbit(planet, eccentricities[planet.menu_index], "#4b617d", 1, (4, 7))
 
+        # Draw selected min/max/current orbital envelopes.
+        if self.selected.has_varying_eccentricity:
+            self.draw_orbit(self.selected, self.selected.eccentricity_min, "#9abfff", 1, (2, 8))
+            self.draw_orbit(self.selected, self.selected.eccentricity_max, "#ff8d8d", 1, (9, 5))
+            self.draw_orbit_limit_labels(self.selected)
+
+        self.draw_orbit(self.selected, eccentricities[self.selected.menu_index], "#f4f8ff", 3, (8, 6))
+
+        # Draw fixed host star.
         sx, sy = self.transform(0.0, 0.0)
-        self.canvas.create_oval(sx - 18, sy - 18, sx + 18, sy + 18, fill="#ffca45", outline="")
-        self.canvas.create_oval(sx - 7, sy - 7, sx + 7, sy + 7, fill="#fff2a6", outline="")
-        self.canvas.create_text(sx, sy + 31, text=self.selected.host, fill="#ffe9a8", font=("Arial", 10, "bold"))
+        star_outer_radius = int(18 * STAR_DISPLAY_SCALE)
+        star_inner_radius = int(7 * STAR_DISPLAY_SCALE)
+        self.canvas.create_oval(
+            sx - star_outer_radius,
+            sy - star_outer_radius,
+            sx + star_outer_radius,
+            sy + star_outer_radius,
+            fill="#ffca45",
+            outline="",
+        )
+        self.canvas.create_oval(
+            sx - star_inner_radius,
+            sy - star_inner_radius,
+            sx + star_inner_radius,
+            sy + star_inner_radius,
+            fill="#fff2a6",
+            outline="",
+        )
+        self.canvas.create_text(
+            sx,
+            sy + star_outer_radius + 13,
+            text=self.selected.host,
+            fill="#ffe9a8",
+            font=("Arial", 10, "bold"),
+        )
 
         for planet in self.planets:
-            state = states[planet.name]
+            state = states[planet.menu_index]
             selected = planet.menu_index == self.selected.menu_index
             px, py = self.transform(state["x"], state["y"])
             self.draw_planet_disc(planet, state, px, py, selected)
 
-        selected_state = states[self.selected.name]
-        self.update_sidebar(elapsed, sim_year, selected_state)
+        selected_state = states[self.selected.menu_index]
+        selected_e = eccentricities[self.selected.menu_index]
+        self.update_sidebar(elapsed, selected_orbit_count, selected_state, selected_e)
 
         self.canvas.create_text(
             22,
@@ -668,22 +830,37 @@ class ExoplanetOrbitApp:
         self.canvas.create_text(
             22,
             45,
-            text="Dashed curves: Keplerian orbits. Star fixed at one focus. Planet colours: idealised latitude-band temperatures.",
+            text="Selected planet completes one visible orbit every few seconds. Star fixed at focus. Temperature responds to changing distance.",
             fill="#9fb5d1",
             font=("Arial", 10),
             anchor="w",
         )
 
-    def update_sidebar(self, elapsed: float, sim_year: float, state: dict[str, float]) -> None:
+    def update_sidebar(
+        self,
+        elapsed: float,
+        selected_orbit_count: float,
+        state: dict[str, float],
+        selected_e: float,
+    ) -> None:
         self.metrics["Selected planet"].config(text=f"{self.selected.name}  [choice {self.selected.menu_index}]")
         self.metrics["Host star"].config(text=self.selected.host)
-        self.metrics["Simulated year"].config(text=f"{sim_year:,.1f} / {self.simulated_years:,.0f}")
-        self.metrics["Orbital period"].config(text=f"{self.selected.period_days:,.4f} days")
-        self.metrics["Semi-major axis"].config(text=f"{self.selected.semi_major_axis_au:.5f} AU")
-        self.metrics["Eccentricity"].config(text=f"{self.selected.eccentricity:.5f}")
-        self.metrics["Distance"].config(text=f"{state['r']:.5f} AU")
+        self.metrics["Real orbital period"].config(text=f"{self.selected.period_days:,.4f} days")
+        self.metrics["Animation scale"].config(text=f"1 orbit = {self.orbit_seconds:.2f} real seconds")
+        self.metrics["Elapsed real time"].config(text=f"{elapsed:.1f} s")
+        self.metrics["Simulated orbit count"].config(text=f"{selected_orbit_count:,.2f} selected-planet orbits")
+        self.metrics["Semi-major axis"].config(text=f"{self.selected.semi_major_axis_au:.6f} AU")
+        self.metrics["Eccentricity now"].config(text=f"{selected_e:.6f}")
+        self.metrics["Eccentricity limits"].config(
+            text=f"{self.selected.eccentricity_min:.6f} to {self.selected.eccentricity_max:.6f}"
+        )
+        self.metrics["Current periapsis"].config(text=f"{state['peri_au']:.6f} AU")
+        self.metrics["Current apoapsis"].config(text=f"{state['apo_au']:.6f} AU")
+        self.metrics["Current distance"].config(text=f"{state['r']:.6f} AU")
         self.metrics["Orbital speed"].config(text=f"{state['speed'] / 1000.0:.3f} km/s")
         self.metrics["Global temp"].config(text=f"{state['global_c']:.2f} °C")
+        self.metrics["Periapsis temp"].config(text=f"{state['peri_temp_c']:.2f} °C")
+        self.metrics["Apoapsis temp"].config(text=f"{state['apo_temp_c']:.2f} °C")
         self.metrics["Substellar latitude"].config(text=f"{state['sub_lat']:.2f}°")
         self.metrics["North pole temp"].config(text=f"{state['north_pole_c']:.2f} °C")
         self.metrics["Equator temp"].config(text=f"{state['equator_c']:.2f} °C")
@@ -693,8 +870,10 @@ class ExoplanetOrbitApp:
             status = "Finished"
         elif self.paused:
             status = "Paused"
-        else:
+        elif self.duration_seconds > 0:
             status = f"Running: {elapsed:.1f} / {self.duration_seconds:.0f} s"
+        else:
+            status = "Running continuously"
         self.metrics["Animation status"].config(text=status)
 
     def _tick(self) -> None:
@@ -702,7 +881,7 @@ class ExoplanetOrbitApp:
             return
 
         elapsed = self.elapsed_real_seconds()
-        if elapsed >= self.duration_seconds:
+        if self.duration_seconds > 0 and elapsed >= self.duration_seconds:
             self.finished = True
 
         self.draw_frame()
@@ -714,12 +893,15 @@ class ExoplanetOrbitApp:
         self._tick()
         self.root.mainloop()
 
-
-# ------------------------------------------------------------
 # Main program
-# ------------------------------------------------------------
-
 def choose_selected_planet(planets: list[Exoplanet], requested_choice: int | None) -> Exoplanet:
+    """
+    Selects exactly one planet.
+
+    If --choice is supplied, the program selects that global planet number.
+    Otherwise, the terminal first asks for a host star, then asks for one planet
+    orbiting that chosen host star.
+    """
     by_choice = {planet.menu_index: planet for planet in planets}
 
     if requested_choice is not None:
@@ -731,18 +913,59 @@ def choose_selected_planet(planets: list[Exoplanet], requested_choice: int | Non
         print("No exoplanet CSV was supplied, so the program will use Earth orbiting the Sun.")
         return planets[0]
 
-    print_planet_menu(planets)
+    hosts: list[str] = []
+    for planet in planets:
+        if planet.host not in hosts:
+            hosts.append(planet.host)
+
+    print("Choose a host star:")
+    print("number | host star | planets available")
+    print("-" * 60)
+    for i, host in enumerate(hosts, start=1):
+        count = sum(1 for planet in planets if planet.host == host)
+        print(f"{i:6d} | {host[:32]:32s} | {count}")
+
     while True:
-        raw = input(f"Enter a planet number from 1 to {len(planets)}: ").strip()
+        raw = input(f"Enter a host-star number from 1 to {len(hosts)}: ").strip()
         try:
-            choice = int(raw)
+            host_choice = int(raw)
         except ValueError:
             print("Please enter an integer.")
             continue
-        if choice in by_choice:
-            return by_choice[choice]
-        print(f"That choice was not found. Enter a number from 1 to {len(planets)}.")
+        if 1 <= host_choice <= len(hosts):
+            chosen_host = hosts[host_choice - 1]
+            break
+        print(f"That host was not found. Enter a number from 1 to {len(hosts)}.")
 
+    host_planets = [planet for planet in planets if planet.host == chosen_host]
+
+    print(f"Choose a planet orbiting {chosen_host}:")
+    print("number | global choice | planet | P / days | a / AU | e")
+    print("-" * 86)
+    for local_index, planet in enumerate(host_planets, start=1):
+        if planet.has_varying_eccentricity:
+            e_text = f"{planet.eccentricity_min:.3f}-{planet.eccentricity_max:.3f}"
+        else:
+            e_text = f"{planet.eccentricity:.3f}"
+        print(
+            f"{local_index:6d} | "
+            f"{planet.menu_index:13d} | "
+            f"{planet.name[:24]:24s} | "
+            f"{planet.period_days:9.3f} | "
+            f"{planet.semi_major_axis_au:7.4f} | "
+            f"{e_text:>11s}"
+        )
+
+    while True:
+        raw = input(f"Enter a planet number from 1 to {len(host_planets)}: ").strip()
+        try:
+            planet_choice = int(raw)
+        except ValueError:
+            print("Please enter an integer.")
+            continue
+        if 1 <= planet_choice <= len(host_planets):
+            return host_planets[planet_choice - 1]
+        print(f"That planet was not found. Enter a number from 1 to {len(host_planets)}.")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Animate exoplanet orbital temperature from a CSV file.")
@@ -765,9 +988,25 @@ def main() -> None:
         default=None,
         help="Deprecated alias for --choice. Use --choice instead.",
     )
-    parser.add_argument("--single", action="store_true", help="Animate only the selected planet, not the full host system")
-    parser.add_argument("--years", type=float, default=10_000.0, help="Simulated years covered by the animation")
-    parser.add_argument("--duration", type=float, default=60.0, help="Real seconds the animation should run")
+    parser.add_argument("--single", action="store_true", help="Legacy option. The program now always animates only the selected planet.")
+    parser.add_argument(
+        "--orbit-seconds",
+        type=float,
+        default=60.0,
+        help="How many real seconds one selected-planet revolution takes visually",
+    )
+    parser.add_argument(
+        "--eccentricity-cycle-seconds",
+        type=float,
+        default=30.0,
+        help="Time for eccentricity to go from min to max and back to min",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help="Animation duration in real seconds. Use 0 for continuous running.",
+    )
     parser.add_argument("--tilt", type=float, default=None, help="Override axial tilt in degrees for all planets")
     args = parser.parse_args()
 
@@ -789,22 +1028,15 @@ def main() -> None:
 
     selected = choose_selected_planet(planets, requested_choice)
 
-    if args.single:
-        displayed_planets = [selected]
-    else:
-        displayed_planets = [planet for planet in planets if planet.host == selected.host]
-        if not displayed_planets:
-            displayed_planets = [selected]
+    displayed_planets = [selected]
 
     print(f"\nSelected: {selected.name} around {selected.host}")
-    print(f"Animating {len(displayed_planets)} planet(s) for {args.duration:.0f} seconds.")
-    print(f"Simulation span: {args.years:,.0f} years.")
-    print("The host star is fixed at the centre of the animation.\n")
 
     app = ExoplanetOrbitApp(
         planets=displayed_planets,
         selected=selected,
-        simulated_years=args.years,
+        orbit_seconds=args.orbit_seconds,
+        eccentricity_cycle_seconds=args.eccentricity_cycle_seconds,
         duration_seconds=args.duration,
     )
     app.run()
@@ -812,3 +1044,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
