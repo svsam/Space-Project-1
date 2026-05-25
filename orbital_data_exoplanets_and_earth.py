@@ -1,30 +1,3 @@
-"""
-Generate orbital-quarter temperature data for exoplanets and Earth.
-
-This script is separate from the animation program. It reads the exoplanet CSV,
-samples each exoplanet at four points in one orbit, and writes the results to a
-new CSV file.
-
-It also creates a separate Earth-only CSV using three eccentricity cases:
-    1. minimum eccentricity limit
-    2. midpoint eccentricity
-    3. maximum eccentricity limit
-
-For each planet and each quarter orbit, the script records:
-    - orbital period
-    - current distance
-    - eccentricity
-    - orbital speed
-    - global equilibrium temperature
-    - north pole temperature
-    - equator temperature
-    - south pole temperature
-
-Run examples:
-    python generate_orbital_quarter_data.py exoplanet_expected_eccentricities.csv
-    python generate_orbital_quarter_data.py exoplanet_expected_eccentricities.csv --output exoplanet_quarters.csv --earth-output earth_quarters.csv
-"""
-
 from __future__ import annotations
 
 import argparse
