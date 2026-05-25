@@ -1,3 +1,5 @@
+#python3 exoplanet_orbit_temperature_sim.py exoplanet_expected_eccentricities.csv --choice number
+
 from __future__ import annotations
 
 import argparse
